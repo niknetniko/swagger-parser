@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 public class InlineModelResolver {
     private OpenAPI openAPI;
@@ -327,6 +328,31 @@ public class InlineModelResolver {
         Map<String, Schema> modelsToAdd = new HashMap<>();
         for (String key : properties.keySet()) {
             Schema property = properties.get(key);
+            if (property instanceof ComposedSchema) {
+                ComposedSchema composedSchema = (ComposedSchema) property;
+                List<Schema> list = composedSchema.getAllOf();
+                if (list != null) {
+                    List<Schema> toInline = list.stream()
+                            .filter(s -> s.get$ref() == null)
+                            .collect(Collectors.toList());
+                    if (toInline.size() >= 1) {
+                        // This model should be a separate model!
+                        String modelName = resolveModelName(composedSchema.getTitle(), path + "_" + key);
+                        Schema model = modelFromProperty(composedSchema, modelName);
+
+                        String existing = matchGenerated(model);
+
+                        if (existing != null) {
+                            propsToUpdate.put(key, new Schema().$ref(existing));
+                        } else {
+                            propsToUpdate.put(key, new Schema().$ref(modelName));
+                            modelsToAdd.put(modelName, model);
+                            addGenerated(modelName, model);
+                            openAPI.getComponents().addSchemas(modelName, model);
+                        }
+                    }
+                }
+            }
             if (property instanceof ObjectSchema && ((ObjectSchema) property).getProperties() != null
                     && ((ObjectSchema) property).getProperties().size() > 0) {
 
@@ -431,7 +457,7 @@ public class InlineModelResolver {
         XML xml = object.getXml();
         Map<String, Schema> properties = object.getProperties();
 
-        Schema model = new Schema();//TODO Verify this!
+        Schema model = new ObjectSchema();//TODO Verify this!
         model.setDescription(description);
         model.setExample(example);
         model.setName(name);
@@ -443,6 +469,50 @@ public class InlineModelResolver {
             flattenProperties(properties, path);
             model.setProperties(properties);
         }
+
+        return model;
+    }
+
+    public Schema modelFromProperty(ComposedSchema object, String path) {
+        String description = object.getDescription();
+        String example = null;
+
+        Object obj = object.getExample();
+        if (obj != null) {
+            example = obj.toString();
+        }
+        String name = object.getName();
+        XML xml = object.getXml();
+        Map<String, Schema> properties = object.getProperties();
+        if (properties == null) {
+            properties = new HashMap<>();
+        }
+
+        ComposedSchema model = new ComposedSchema();//TODO Verify this!
+        model.setDescription(description);
+        model.setExample(example);
+        model.setName(name);
+        model.setXml(xml);
+        model.setType(object.getType());
+        model.setRequired(object.getRequired());
+        model.setAllOf(object.getAllOf());
+
+        List<Schema> list = null;
+        if (object.getAllOf() != null) {
+            list = object.getAllOf();
+        } else if (object.getAnyOf() != null) {
+            list = object.getAnyOf();
+        } else if (object.getOneOf() != null) {
+            list = object.getOneOf();
+        }
+
+        for (Schema aList : list) {
+            if (aList.getProperties() != null) {
+                properties.putAll(aList.getProperties());
+            }
+        }
+
+        model.setProperties(properties);
 
         return model;
     }
