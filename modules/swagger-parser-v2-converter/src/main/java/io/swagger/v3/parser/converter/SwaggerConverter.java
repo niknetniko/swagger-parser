@@ -80,6 +80,7 @@ public class SwaggerConverter implements SwaggerParserExtension {
     private List<String> globalConsumes = new ArrayList<>();
     private List<String> globalProduces = new ArrayList<>();
     private Components components = new Components();
+    private Map<String, io.swagger.models.parameters.Parameter> globalV2Parameters = new HashMap<>();
 
     @Override
     public SwaggerParseResult readLocation(String url, List<AuthorizationValue> auths, ParseOptions options) {
@@ -185,6 +186,7 @@ public class SwaggerConverter implements SwaggerParserExtension {
         }
 
         if (swagger.getParameters() != null) {
+            globalV2Parameters.putAll(swagger.getParameters());
             swagger.getParameters().forEach((k, v) -> {
                 if ("body".equals(v.getIn())) {
                     components.addRequestBodies(k, convertParameterToRequestBody(v));
@@ -295,25 +297,28 @@ public class SwaggerConverter implements SwaggerParserExtension {
         OAuthFlow oAuthFlow = new OAuthFlow();
 
         securityScheme.setType(SecurityScheme.Type.OAUTH2);
+        String flow = oAuth2Definition.getFlow();
 
-        switch (oAuth2Definition.getFlow()) {
-            case "implicit":
-                oAuthFlow.setAuthorizationUrl(oAuth2Definition.getAuthorizationUrl());
-                oAuthFlows.setImplicit(oAuthFlow);
-                break;
-            case "password":
-                oAuthFlow.setTokenUrl(oAuth2Definition.getTokenUrl());
-                oAuthFlows.setPassword(oAuthFlow);
-                break;
-            case "application":
-                oAuthFlow.setTokenUrl(oAuth2Definition.getTokenUrl());
-                oAuthFlows.setClientCredentials(oAuthFlow);
-                break;
-            case "accessCode":
-                oAuthFlow.setAuthorizationUrl(oAuth2Definition.getAuthorizationUrl());
-                oAuthFlow.setTokenUrl(oAuth2Definition.getTokenUrl());
-                oAuthFlows.setAuthorizationCode(oAuthFlow);
-                break;
+        if (flow != null) {
+            switch (flow) {
+                case "implicit":
+                    oAuthFlow.setAuthorizationUrl(oAuth2Definition.getAuthorizationUrl());
+                    oAuthFlows.setImplicit(oAuthFlow);
+                    break;
+                case "password":
+                    oAuthFlow.setTokenUrl(oAuth2Definition.getTokenUrl());
+                    oAuthFlows.setPassword(oAuthFlow);
+                    break;
+                case "application":
+                    oAuthFlow.setTokenUrl(oAuth2Definition.getTokenUrl());
+                    oAuthFlows.setClientCredentials(oAuthFlow);
+                    break;
+                case "accessCode":
+                    oAuthFlow.setAuthorizationUrl(oAuth2Definition.getAuthorizationUrl());
+                    oAuthFlow.setTokenUrl(oAuth2Definition.getTokenUrl());
+                    oAuthFlows.setAuthorizationCode(oAuthFlow);
+                    break;
+            }
         }
 
         Scopes scopes = new Scopes();
@@ -406,14 +411,9 @@ public class SwaggerConverter implements SwaggerParserExtension {
                 servers.add(server);
             }
         } else {
-            if (!"/".equals(baseUrl)) {
-                Server server = new Server();
-                server.setUrl(baseUrl);
-
-                servers.add(server);
-            } else {
-                return null;
-            }
+            Server server = new Server();
+            server.setUrl(baseUrl);
+            servers.add(server);
         }
 
         return servers;
@@ -513,6 +513,16 @@ public class SwaggerConverter implements SwaggerParserExtension {
         return v3Path;
     }
 
+    private boolean isRefABodyParam(io.swagger.models.parameters.Parameter param) {
+        if (param instanceof RefParameter) {
+            RefParameter refParameter = (RefParameter) param;
+            String simpleRef = refParameter.getSimpleRef();
+            io.swagger.models.parameters.Parameter parameter = globalV2Parameters.get(simpleRef);
+            return "body".equals(parameter.getIn());
+        }
+        return false;
+    }
+
     public Operation convert(io.swagger.models.Operation v2Operation) {
         Operation operation = new Operation();
         if (StringUtils.isNotBlank(v2Operation.getDescription())) {
@@ -535,7 +545,14 @@ public class SwaggerConverter implements SwaggerParserExtension {
                 } else if ("body".equals(param.getIn())) {
                     operation.setRequestBody(convertParameterToRequestBody(param, v2Operation.getConsumes()));
                 } else {
-                    operation.addParametersItem(convert(param));
+                    Parameter convert = convert(param);
+                    String $ref = convert.get$ref();
+                    if ($ref != null && $ref.startsWith("#/components/requestBodies/") && isRefABodyParam(param)) {
+                        operation.setRequestBody(new RequestBody().$ref($ref));
+                    } else {
+                        operation.addParametersItem(convert);
+                    }
+                    //operation.addParametersItem(convert(param));
                 }
             }
 
@@ -1067,11 +1084,15 @@ public class SwaggerConverter implements SwaggerParserExtension {
             result = arraySchema;
         } else if (v2Model instanceof ComposedModel) {
             ComposedModel composedModel = (ComposedModel) v2Model;
-
-            ComposedSchema composed = Json.mapper().convertValue(v2Model, ComposedSchema.class);
-
+            ComposedSchema composed = new ComposedSchema();
+            composed.setDescription(composedModel.getDescription());
+            composed.setExample(composedModel.getExample());
+            if (composedModel.getExternalDocs() != null) {
+                composed.setExternalDocs(convert(composedModel.getExternalDocs()));
+            }
+            composed.setTitle(composedModel.getTitle());
+            composed.setExtensions(convert(composedModel.getVendorExtensions()));
             composed.setAllOf(composedModel.getAllOf().stream().map(this::convert).collect(Collectors.toList()));
-
             result = composed;
         } else {
             String v2discriminator = null;
